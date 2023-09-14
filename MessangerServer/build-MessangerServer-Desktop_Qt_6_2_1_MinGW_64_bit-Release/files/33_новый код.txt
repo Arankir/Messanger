@@ -1,0 +1,499 @@
+<?php
+
+/*
+  Plugin Name: WP SMS Register
+  Plugin URI: http://codeseller.ru/
+  Description: Подтверждение регистрации на WordPress сайте через SMS
+  Version: 1.2.5
+  ItemID: 12503
+  Author: Plechev Andrey
+  Author URI: http://codeseller.ru/
+  Text Domain: wp-sms-register
+  CodesellerID: wp-sms-register
+  Domain Path: /languages
+  License: GPLv2 or later
+ */
+/*  Copyright 2016  Plechev Andrey  (email : support {at} codeseller.ru)  */
+
+function wsr_install() {
+	global $wpdb;
+
+
+	$table_name			 = $wpdb->prefix . 'wsr_register';
+	$table_errors_name	 = $wpdb->prefix . 'wsr_errors';
+
+	if ( $wpdb->get_var( "SHOW TABLES LIKE `" . $table_name . "` " ) != $table_name ) {
+		$sql = "CREATE TABLE IF NOT EXISTS `" . $table_name . "` (
+            `username` varchar(100) character set utf8 NOT NULL,
+            `phone_number` varchar(17) character set utf8 NOT NULL,
+            `sent_code` varchar(17) character set utf8 NOT NULL,
+            `sent_sms` int(7) unsigned NOT NULL default '0',
+            `last_sent` varchar(17) character set utf8 NOT NULL,
+            `status` tinyint(1) unsigned NOT NULL default '0',
+            UNIQUE KEY `username` (`username`,`sent_code`)
+            ) ENGINE=MyISAM DEFAULT CHARSET=utf8;";
+
+		$wpdb->query( $sql );
+	}
+
+	if ( $wpdb->get_var( "SHOW TABLES LIKE `" . $table_errors_name . "` " ) != $table_errors_name ) {
+		$sql = "CREATE TABLE IF NOT EXISTS `" . $table_errors_name . "` (
+            `id` int(11) NOT NULL unique AUTO_INCREMENT,
+            `error_code` int(3) unsigned NOT NULL,
+            `error_log` varchar(255) character set utf8 NOT NULL default '-',
+            `date` varchar(17) character set utf8 NOT NULL
+            ) ENGINE=MyISAM DEFAULT CHARSET=utf8;";
+
+		$wpdb->query( $sql );
+	}
+}
+
+register_activation_hook( __FILE__, 'wsr_install' );
+function wsr_reg_deactivation() {
+	global $wpdb;
+
+	$table_name			 = $wpdb->prefix . 'wsr_register';
+	$table_errors_name	 = $wpdb->prefix . 'wsr_errors';
+
+	$wpdb->query( "DROP TABLE `" . $table_name . "`" );
+	$wpdb->query( "DROP TABLE `" . $table_errors_name . "`" );
+}
+
+register_uninstall_hook( __FILE__, 'wsr_reg_deactivation' );
+
+add_action( 'init', 'wsr_reg_init' );
+function wsr_reg_init() {
+	if ( ! session_id() )
+		session_start();
+}
+
+add_action( 'register_form', 'wsr_reg_add_field', 1 );
+function wsr_reg_add_field() {
+	if ( $_SESSION['wsr_confirm'] )
+		return TRUE;
+
+//  $html = __( '<label>Номер телефона:</label>' )
+// 		. '<input id="phone_number" name="phone_number" mask="8(999) 999-9999" placeholder="89991234567" type="text" maxlength="11" value="' . addslashes( $_REQUEST['phone_number'] ) . '" 
+// 		pattern="8[0-9]{10}" title="Введите номер телефона в следующем формате: 89XXXXXXXXX" required />' /*Добавил плейсхолдер*//*Добавил эту строку-*/
+// 		. __( 'На указанный номер будет выслан код подтверждения.' ) . '<br /><br />'; /*Убрал <strong>Введите номер доступного мобильного телефона в формате 89XXXXXXXXX.</strong> */
+
+// 	if ( $_SESSION['phone_number'] ) {
+// 		$html = __( '<label>SMS код:</label>' )
+// 			. '<input name="sms_code" type="text" maxlength="7" value="' . addslashes( $_REQUEST['sms_code'] ) . '" />'
+// 			. __( 'Введите код полученный в SMS-сообщении' ) . ' &laquo;' . $_SESSION['phone_number'] . '&raquo;<br /><br />';
+// 	}
+
+ $html = __( '<label>Номер телефона:</label>' )
+		. '<input id="phone_number" name="phone_number" mask="8(999) 999-9999" placeholder="89991234567" type="text" maxlength="11" value="' . addslashes( $_REQUEST['phone_number'] ) . '" 
+		pattern="8[0-9]{10}" title="Введите номер телефона в следующем формате: 89XXXXXXXXX" required />' /*Добавил плейсхолдер*//*Добавил эту строку-*/
+		. __( 'На указанный номер будет произведен звонок.' ) . '<br /><br />'; /*Убрал <strong>Введите номер доступного мобильного телефона в формате 89XXXXXXXXX.</strong> */
+
+	if ( $_SESSION['phone_number'] ) {
+		$html = __( '<label>Последние 4 цифры звонящего номера:</label>' )
+			. '<input name="sms_code" type="text" maxlength="7" value="' . addslashes( $_REQUEST['sms_code'] ) . '" />'
+			. __( 'Введите последние 4 цифры номера с которого вам звонят' ) . ' &laquo;' . $_SESSION['phone_number'] . '&raquo;<br /><br />';
+	}
+
+	echo $html;
+}
+
+add_filter( 'registration_errors', 'wsr_reg_validate' );
+function wsr_reg_validate( $result ) {
+
+	if ( count( $result->errors ) ) {
+		return $result;
+	}
+
+	global $wpdb;
+
+	$error				 = FALSE;
+	$table_name			 = $wpdb->prefix . 'wsr_register';
+	$table_errors_name	 = $wpdb->prefix . 'wsr_errors';
+
+	if ( $_SESSION['wsr_confirm'] )
+		return $result;
+
+	if ( $_SESSION['phone_number'] ) {
+		if ( empty( $_REQUEST['sms_code'] ) )
+			$error = __( '<strong>ОШИБКА</strong>: Неверный SMS код.' );
+
+		if ( ! $error ) {
+			$data = $wpdb->get_row( "SELECT * FROM $table_name
+                WHERE phone_number='" . addslashes( $_SESSION['phone_number'] ) . "'
+                AND sent_code='" . addslashes( $_REQUEST['sms_code'] ) . "'
+                AND status='0'", ARRAY_A );
+
+			if ( $data ) {
+				$wpdb->query( "UPDATE $table_name SET status=1
+                            WHERE phone_number='" . addslashes( $_SESSION['phone_number'] ) . "'" );
+
+				$_SESSION['wsr_confirm'] = TRUE;
+			} else {
+				$error = __( '<strong>ОШИБКА</strong>: Неверный SMS код.' );
+			}
+		}
+	}  /*паганая вещь*/else {
+		if ( (empty( $_REQUEST['phone_number'])or(strlen($_REQUEST['phone_number'] )<11)or(strlen($_REQUEST['phone_number'] )>11) ))
+			$error = __( '<strong>ОШИБКА</strong>: Неверный формат номера.' );    /*паганая вещь*/
+
+		if ( ! $error ) {
+			$phones = wsr_check_phones( $_REQUEST['phone_number'], 1 );
+
+			if ( ! $phones['phones_valid'] ) {
+				$error = __( '<strong>ОШИБКА</strong>: Неверный номер телефона.' );
+				
+			
+				
+			} else {
+				# Send SMS
+				$data = $wpdb->get_row( "SELECT * FROM $table_name
+                    WHERE phone_number='" . addslashes( $phones['phones_valid'] ) . "'", ARRAY_A );
+
+				if ( ! $data ) {
+// 					$code = mt_rand( 0000001, 9999999 );
+
+// 					$msg = sprintf( 'Код регистрации: %s', $code ); //Поменял на русский
+
+					$res = wsr_call( $phones['phones_valid']/*, $msg*/ );
+
+// 					if ( $res['status'] == 100 ) {
+					if ( $res['status'] == 'OK' ) {
+						$_SESSION['phone_number'] = $phones['phones_valid'];
+
+// 						$wpdb->query( "INSERT INTO " . $table_name . " (username, phone_number, sent_code, sent_sms, last_sent, status)
+//                             VALUES ('" . addslashes( $_REQUEST['user_login'] ) . "', '" . $phones['phones_valid'] . "', " . $code . ", 1, '" . time() . "', 0);" );/*изменил с time( TRUE ) на time()*/
+
+						$wpdb->query( "INSERT INTO " . $table_name . " (username, phone_number, sent_code, sent_sms, last_sent, status)
+                            VALUES ('" . addslashes( $_REQUEST['user_login'] ) . "', '" . $phones['phones_valid'] . "', " . $res['code'] . ", 1, '" . time() . "', 0);" );/*изменил с time( TRUE ) на time()*/
+
+// 						$error = '<br/><strong>ВНИМАНИЕ</strong>: Подтвердите номер ' . $phones['phones_valid'] . ' полученным кодом. '; /*Изменил сообщение*/
+						$error = '<br/><strong>ВНИМАНИЕ</strong>: Подтвердите номер ' . $phones['phones_valid'] . ' введя последние 4 цифры номера, который вам позвонит. '; /*Изменил сообщение*/
+					} else {
+						# Save error log
+						$log = __( 'Username' ) . ': ' . addslashes( $_REQUEST['user_login'] ) . '<br/>' . __( 'Email' ) . ': ' . addslashes( $_REQUEST['user_email'] ) . '<br/> ' . __( 'Phone number' ) . ': ' . $phones['phones_valid'] . '<br/>';
+
+// 						$log .= 'SMS API: ' . wsr_error_messages( $res['status'] );
+						$log .= 'SMS API: ' . $res['status_text'];
+
+// 						$wpdb->query( "INSERT INTO `" . $table_errors_name . "` (error_code, error_log, date)
+//                              VALUES (" . $res['status'] . ", '" . $log . "', '" . time( TRUE ) . "');" );
+						$wpdb->query( "INSERT INTO `" . $table_errors_name . "` (error_code, error_log, date)
+                             VALUES (0, '" . $log . "', '" . time( TRUE ) . "');" );
+
+						$error = __( '<strong>ОШИБКА</strong>: SMS не отправлено. Попробуйте повторить запрос через 3-5 минут.' );
+					}
+				} else {
+					$error = __( '<strong>ОШИБКА</strong>: Номер телефона уже зарегистрирован.' );
+				}
+			}
+		}
+	}
+
+	if ( $error ) {
+		$result->errors['smsfox_wrong'] = array( $error );
+	}
+
+	return $result;
+}
+
+function wsr_error_messages( $code ) {
+	$errors = array(
+		200	 => 'Неправильный api_id',
+		201	 => 'Не хватает средств на лицевом счету',
+		202	 => 'Неправильно указан получатель',
+		203	 => 'Нет текста сообщения',
+		204	 => 'Имя отправителя не согласовано с администрацией',
+		205	 => 'Сообщение слишком длинное (превышает 8 СМС)',
+		206	 => 'Будет превышен или уже превышен дневной лимит на отправку сообщений',
+		207	 => 'На этот номер (или один из номеров) нельзя отправлять сообщения, либо указано более 100 номеров в списке получателей',
+		208	 => 'Параметр time указан неправильно',
+		209	 => 'Вы добавили этот номер (или один из номеров) в стоп-лист',
+		210	 => 'Используется GET, где необходимо использовать POST',
+		211	 => 'Метод не найден',
+		212	 => 'Текст сообщения необходимо передать в кодировке UTF-8 (вы передали в другой кодировке)',
+		220	 => 'Сервис временно недоступен, попробуйте чуть позже.',
+		230	 => 'Сообщение не принято к отправке, так как на один номер в день нельзя отправлять более 60 сообщений.',
+		300	 => 'Неправильный token (возможно истек срок действия, либо ваш IP изменился)',
+		301	 => 'Неправильный пароль, либо пользователь не найден',
+		302	 => 'Пользователь авторизован, но аккаунт не подтвержден (пользователь не ввел код, присланный в регистрационной смс)'
+	);
+
+	if ( ! isset( $errors[$code] ) )
+		return 'Неопознанная ошибка. Код: ' . $code;
+
+	return $errors[$code];
+}
+
+add_action( 'user_register', 'wsr_reg_active_user', 110 );
+function wsr_reg_active_user( $user_id ) {
+	update_user_meta( $user_id, 'user_phone', $_SESSION['phone_number'] );
+	#delete session
+	$_SESSION['phone_number']	 = FALSE;
+	$_SESSION['wsr_confirm']	 = FALSE;
+}
+
+function wsr_check_phones( $phones, $count ) {
+	$phones = str_replace( '+', '', $phones );
+
+	if ( ! is_array( $phones ) )
+		$phones = explode( ',', $phones );
+
+ /*паганая вещь*/	//$pattern = '/^([87](?!95[4-9]|99\d|907|94[^0]|812[^9]|336)([34]\d|9[^7]|8[13]|7[07])\d{8}|855\d{8}|[12456]\d{9,13}|500[56]\d{4}|376\d{6}|8[68]\d{10,11}|8[14]\d{10}|82\d{9,10}|852\d{8}|90\d{10}|96(0[79]|170|13)\d{6}|96[23]\d{9}|964\d{10}|96(5[69]|89)\d{7}|96(65|77)\d{8}|92[023]\d{9}|91[1879]\d{9}|9[34]7\d{8}|959\d{7}|989\d{9}|97\d{8,12}|99[^45]\d{7,11}|994\d{9}|9955\d{8}|380[34569]\d{8}|38[15]\d{9}|375[234]\d{8}|372\d{7,8}|37[0-4]\d{8}|37[6-9]\d{7,11}|30[69]\d{9}|34[67]\d{8}|3[123569]\d{8,12}|38[1679]\d{8}|382\d{8,9})$/is';
+	$pattern = '/^(8)?[\s\-]?\(?[489][0-9]{2}\)?[\s\-]?[0-9]{3}[\s\-]?[0-9]{2}[\s\-]?[0-9]{2}$/is'; /*паганая вещь*/
+
+	$valid	 = array();
+	$fail	 = array();
+	$cost	 = 0;
+
+	foreach ( $phones as $key => $phone ) {
+		$phone = trim( $phone );
+
+		if ( preg_match( $pattern, $phone ) ) {
+			$valid[$key] = $phone;
+			//$cost += $this->getCost($phone) * $count;
+		} else {
+			$fail[$key] = $phone;
+		}
+	}
+
+	return array(
+		'phones_valid'	 => implode( ',', $valid ),
+		'phones_fail'	 => implode( ',', $fail ) );
+}
+
+function wsr_send( $phone, $text ) {
+
+	$wsr_options = get_option( 'wsr_options' );
+
+	$data = array(
+		"api_id"	 => $wsr_options['api_key'],
+		"partner_id" => '158564',
+		"to"		 => $phone,
+		"text"		 => $text//iconv( "windows-1251", "utf-8", $text ) убрал перевод в другой кодировка
+	);
+
+	if ( isset( $wsr_options['from'] ) && $wsr_options['from'] )
+		$data['from'] = $wsr_options['from'];
+
+	$ch = curl_init( "http://sms.ru/sms/send" );
+	curl_setopt( $ch, CURLOPT_RETURNTRANSFER, 1 );
+	curl_setopt( $ch, CURLOPT_TIMEOUT, 30 );
+	curl_setopt( $ch, CURLOPT_POSTFIELDS, $data );
+
+	$body = explode( ' ', curl_exec( $ch ) );
+
+	$res = array(
+		'status'	 => $body[0],
+		'message_id' => $body[1],
+		'balance'	 => str_replace( 'balance=', '', $body[2] )
+	);
+
+	curl_close( $ch );
+
+	return $res;
+}
+
+function wsr_call($phone) {
+
+	$wsr_options = get_option( 'wsr_options' );
+
+	$data = array(
+		"api_id"	 => $wsr_options['api_key'],
+		"partner_id" => '158564',
+		"ip" 		 => $_SERVER["REMOTE_ADDR"],
+		"phone"		 => $phone
+	);
+
+	if ( isset( $wsr_options['from'] ) && $wsr_options['from'] )
+		$data['from'] = $wsr_options['from'];
+
+	$ch = curl_init( "http://sms.ru/code/call" );
+	curl_setopt( $ch, CURLOPT_RETURNTRANSFER, 1 );
+	curl_setopt( $ch, CURLOPT_TIMEOUT, 30 );
+	curl_setopt( $ch, CURLOPT_POSTFIELDS, $data );
+
+	$body = curl_exec( $ch );
+
+	$json = json_decode($body);
+	$res = array(
+		'status'	 => $json->status,
+		'status_text'=> $json->status_text,
+		'code' 		 => $json->code,
+		'call_id' 	 => $json->call_id,
+		'cost' 		 => $json->cost,
+		'balance'	 => $json->balance
+	);
+
+	curl_close( $ch );
+
+	return $res;
+}
+
+# Admin menu
+add_action( 'admin_menu', 'wsr_reg_menu' );
+function wsr_reg_menu() {
+	if ( function_exists( 'add_menu_page' ) ) {
+		add_menu_page( 'SMS Register', 'SMS Register', 'manage_options', 'wp-sms-options', 'wsr_reg_list' );
+	}
+}
+
+# Build paginator
+function _wsr_reg_paginator( $num_rows, $rpp ) {
+	$i = 0;
+	if ( $num_rows == 0 )
+		return '';
+
+	$str = '<p>' . __( 'Pages: ' ) . ' ';
+
+	while ( $num_rows > 0 ) {
+		$str .= '<a href="admin.php?page=sms_wordpress_register/wp-sms-register.php&amp;sms_page=' . ($i + 1) . '">[' . ($i + 1) . ']</a> ';
+		$num_rows -= $rpp;
+		$i ++;
+	}
+
+	return $str . '</p>';
+}
+
+# Sent SMS list
+function wsr_reg_list() {
+	global $wpdb;
+
+	$table_name			 = $wpdb->prefix . 'wsr_register';
+	$table_errors_name	 = $wpdb->prefix . 'wsr_errors';
+
+	$html = '<h2>' . __( 'Настройки подключения к сервису SMS.RU' ) . '</h2>';
+
+	$wsr_options = get_option( 'wsr_options' );
+
+	$html .= '<form method="post" action="options.php">
+            <p><strong>API KEY</strong> <input type="text" size="50" name="wsr_options[api_key]" value="' . $wsr_options['api_key'] . '"></p>
+            <p><strong>Отправитель</strong> <input type="text" size="31" name="wsr_options[from]" value="' . $wsr_options['from'] . '">
+            <input type="submit" name="Submit" class="button-primary" value="Сохранить" /><br/>
+            <small>! Поле "Отправитель" заполняйте только в случае, если оно было предварительно<br/>
+            согласновано с администрацией SMS.RU, иначе оставляйте пустым.</small></p>
+            <input type="hidden" name="action" value="update" />
+            <input type="hidden" name="page_options" value="wsr_options" />
+            ' . wp_nonce_field( 'update-options', '_wpnonce', true, false ) . '
+            </form>';
+
+	$html .= '<h2>' . __( 'Список отправленных SMS' ) . '</h2>';
+
+	if ( ! isset( $_REQUEST['rpp'] ) ) {
+		$rpp = 25;
+	} else {
+		$rpp = intval( $_REQUEST['rpp'] );
+	}
+
+	if ( isset( $_REQUEST['sms_page'] ) && $_REQUEST['sms_page'] != '' ) {
+		$page = intval( $_REQUEST['sms_page'] );
+	} else {
+		$page = 1;
+	}
+
+	if ( isset( $_REQUEST['clear_error_logs'] ) ) {
+		$wpdb->query( "TRUNCATE `" . $table_errors_name . "`" );
+	}
+
+	$offset = $rpp * ($page - 1);
+
+	$result		 = $wpdb->get_row( "SELECT count(*) AS num_rows FROM " . $table_name, ARRAY_A );
+	$num_rows	 = intval( $result['num_rows'] );
+
+	if ( $num_rows > 25 ) {
+		$html .= _wsr_reg_paginator( $num_rows, $rpp );
+	}
+
+	$html .= '<table class="wp-list-table widefat fixed tags">
+    <thead>
+      <tr>
+        <th>' . __( 'Логин' ) . '</th>
+        <th>' . __( 'Номер телефона' ) . '</th>
+        <th>' . __( 'Код' ) . '</th>
+        <th>' . __( 'Послано' ) . '</th>
+        <th>' . __( 'Последняя отправка' ) . '</th>
+        <th>' . __( 'Статус' ) . '</th>
+      </tr>
+    </thead>
+    <tbody>';
+
+	$rows = $wpdb->get_results( "SELECT * FROM " . $table_name . "
+            ORDER BY last_sent DESC
+            LIMIT " . intval( $offset ) . "," . intval( $rpp ) );
+
+	foreach ( $rows as $row ) {
+		$html .= '
+        <tr>
+            <td>' . $row->username . '</td>
+            <td>' . $row->phone_number . '</td>
+            <td>' . $row->sent_code . '</td>
+            <td>' . $row->sent_sms . '</td>
+            <td>' . date( 'H:i:s d/m/Y', $row->last_sent ) . '</td>
+            <td>' . $row->status . '</td>
+        </tr>';
+	}
+
+	$html .= '</tbody></table>';
+
+	$html .= _wsr_reg_paginator( $num_rows, $rpp );
+
+	$html .= '<br/><hr/><h2>' . __( 'Лог ошибок' ) . '</h2>';
+
+	$html .= '<table class="wp-list-table widefat fixed tags">
+    <thead>
+      <tr>
+        <th>' . __( 'Error code' ) . '</th>
+        <th>' . __( 'Info' ) . '</th>
+        <th>' . __( 'Date' ) . '</th>
+      </tr>
+    </thead>
+    <tbody>';
+
+	$rows = $wpdb->get_results( "SELECT * FROM " . $table_errors_name . "
+            ORDER BY date DESC LIMIT 25" );
+
+	foreach ( $rows as $row ) {
+		$html .= '
+        <tr>
+            <td>' . $row->error_code . '</td>
+            <td>' . $row->error_log . '</td>
+            <td>' . date( 'H:i:s d/m/Y', $row->date ) . '</td>
+        </tr>';
+	}
+
+	$html .= '</tbody></table>';
+
+	if ( $rows ) {
+		$html .= '<a href="admin.php?page=sms_wordpress_register/index.php&amp;clear_error_logs=TRUE">' . __( 'Очистить' ) . '</a>';
+	}
+
+	echo $html;
+}
+
+add_action( 'profile_personal_options', 'wsr_phone_in_profile_page', 10 );
+add_action( 'edit_user_profile', 'wsr_phone_in_profile_page', 10 );
+add_action( 'personal_options_update', 'wsr_save_phone_user', 10 );
+add_action( 'edit_user_profile_update', 'wsr_save_phone_user', 10 );
+function wsr_phone_in_profile_page( $user ) {
+	$account_list = '<tr>
+        <th scope="row">Телефон пользователя</th>
+        <td><input type="text" name="user_phone" value="' . get_user_meta( $user->ID, 'user_phone', 1 ) . '"></td>
+        </tr>';
+	echo '<h3>Телефон</h3><table class="form-table">' . $account_list . '</table>';
+}
+
+function wsr_save_phone_user( $user_id ) {
+	update_user_meta( $user_id, 'user_phone', $_POST['user_phone'] );
+}
+
+add_filter( 'rcl_profile_fields', 'wsr_add_rcl_profile_phone', 10 );
+function wsr_add_rcl_profile_phone( $fields ) {
+	$fields[] = array(
+		'slug'		 => 'user_phone',
+		'title'		 => 'Телефон',
+		'type'		 => 'text',
+		'requared'	 => 'requared'
+	);
+	return $fields;
+}
+
+ 

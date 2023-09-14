@@ -1,0 +1,10 @@
+release/database.o
+release/formsettings.o
+release/main.o
+release/maintask.o
+release/server.o
+release/tokengenerator.o
+release/qrc_images.o
+release/moc_formsettings.o
+release/moc_maintask.o
+release/moc_server.o
